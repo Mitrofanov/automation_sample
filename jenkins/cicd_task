@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+
+REGION=<region>
+CLUSTER=<cluster>
+SERVICE="${MICROSERVICE}"
+NEW_VERSION="${MICROSERVICE_VERSION}"
+
+CURRENT_FILE='current_task.json'
+NEW_FILE='new_task.json'
+CURRENT_TASK_DEFINITION=$(aws ecs describe-services --service $SERVICE --region $REGION --cluster $CLUSTER | jq -r '.services[].taskDefinition')
+
+if [ -z "$CURRENT_TASK_DEFINITION" ] ; then
+    echo -e "Can't find task definition for $SERVICE"
+    exit 1
+fi
+
+#Get task definition JSON
+aws ecs describe-task-definition --task-definition $CURRENT_TASK_DEFINITION --region $REGION | jq .taskDefinition | jq 'delpaths([["taskDefinitionArn"],["revision"],["status"],["requiresAttributes"]])' > $CURRENT_FILE
+
+IMAGE_NAME=$(cat $CURRENT_FILE | grep image | awk '{print $2}' | cut -d : -f1 | sed 's/"//')
+VERSION=$(cat $CURRENT_FILE | grep image | awk '{print $2}' | cut -d : -f2 | sed 's/",//')
+FAMILY=$(cat $CURRENT_FILE | grep family | awk '{print $2}' | cut -d '"' -f 2)
+
+cat $CURRENT_FILE | sed -i "s/image.*/image\": \"$IMAGE_NAME:$VERSION\"/" > $NEW_FILE
+
+aws ecs register-task-definition --family ${FAMILY} --cli-input-json file://${WORKSPACE}/${NAME}-v_${BUILD_NUMBER}.json --region ${REGION}
+SERVICES=`aws ecs describe-services --services ${SERVICE} --cluster ${CLUSTER} --region ${REGION} | jq .failures[]`
+#Get latest revision
+REVISION=`aws ecs describe-task-definition --task-definition ${NAME} --region ${REGION} | jq .taskDefinition.revision`
+
+#Create or update service
+if [ "$SERVICES" == "" ]; then
+  echo "entered existing service"
+  DESIRED_COUNT=`aws ecs describe-services --services ${SERVICE} --cluster ${CLUSTER} --region ${REGION} | jq .services[].desiredCount`
+  if [ ${DESIRED_COUNT} = "0" ]; then
+    DESIRED_COUNT="3"
+  fi
+  aws ecs update-service --cluster ${CLUSTER} --region ${REGION} --service ${SERVICE} --task-definition ${FAMILY}:${REVISION} --desired-count ${DESIRED_COUNT}
+else
+  echo "entered new service"
+  aws ecs create-service --service-name ${SERVICE} --desired-count 3 --task-definition ${FAMILY} --cluster ${CLUSTER} --region ${REGION}
+fi
